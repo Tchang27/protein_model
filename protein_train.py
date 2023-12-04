@@ -55,7 +55,7 @@ for i,image in enumerate(raw_data):
     raw_data[i,:,:,1] /= dapi_max
 
 
-tiles = [img_to_tiles(x, 256, 128) for x in raw_data]
+tiles = [img_to_tiles(x, 128, 64) for x in raw_data]
 tiles = np.concatenate(tiles, axis=0)
 filtered = []
 for t in tiles:
