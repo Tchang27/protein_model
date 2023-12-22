@@ -31,53 +31,57 @@ def img_to_tiles(hist_img, img_dim, img_stride):
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 accelerator = Accelerator()
+filtered = []
+holdout = []
 
 # get data - normalize polyt/dapi inputs, predict raw tau, scale by 255
 print("Fetching Data")
-raw_data = np.moveaxis(tf.imread('2023_1108_dlpfc_tau_128totalframes_balanced.npy'),1,-1)[:30,:,:,:]
-print("Tiling Data")
+full_im = np.moveaxis(tf.imread('2023_1108_dlpfc_tau_128totalframes_balanced.npy'),1,-1)
+print(f"Full dataset shape: {full_im.shape}")
 
-'''
-p_max = np.max(raw_data[:,:,:,0])
-raw_data[:,:,:,0] /= p_max
-d_max = np.max(raw_data[:,:,:,1])
-raw_data[:,:,:,1] /= d_max
-t_max = np.max(raw_data[:,:,:,3])
-raw_data[:,:,:,3] /= t_max
+for j in range(135):
+    raw_data = full_im[j:j+1,:,:,:]
+    print(f"Tiling Data {j}")
 
-'''
-for i,image in enumerate(raw_data):
-    im_max = np.max(image[:,:,3])
-    raw_data[i,:,:,3] /= im_max    
-    poly_max = np.max(image[:,:,0])
-    raw_data[i,:,:,0] /= poly_max
-    dapi_max = np.max(image[:,:,1])
-    raw_data[i,:,:,1] /= dapi_max
-
-
-tiles = [img_to_tiles(x, 128, 64) for x in raw_data]
-tiles = np.concatenate(tiles, axis=0)
-filtered = []
-for t in tiles:
-    if (np.max(t[3,:,:]) < 0.1):
-        continue
+    tau_max = np.max(raw_data[:,:,:,3])
+    raw_data[:,:,:,3] /= tau_max    
+    poly_max = np.max(raw_data[:,:,:,0])
+    raw_data[:,:,:,0] /= poly_max
+    dapi_max = np.max(raw_data[:,:,:,1])
+    raw_data[:,:,:,1] /= dapi_max
+    raw_data = np.moveaxis(raw_data, -1,1) 
+    '''
+    tiles = [img_to_tiles(x, 128, 64) for x in raw_data]
+    tiles = np.concatenate(tiles, axis=0)
+    for t in tiles:
+        if j == 4:
+            holdout.append(t)
+        else:
+            filtered.append(t)
+    '''
+    if (j >= 128):
+        holdout.append(raw_data)
     else:
-        filtered.append(t)
+        filtered.append(raw_data)
+
 tiles = np.squeeze(np.array(filtered))
-print(tiles.shape)
-full_dataset = TensorDataset(torch.from_numpy(tiles))
-train_size = int(0.8 * len(full_dataset))
-test_size = len(full_dataset) - train_size
-train_dataset, test_dataset = torch.utils.data.random_split(full_dataset, [train_size, test_size])
-train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=32, num_workers=1, shuffle=True)
-test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=32, num_workers=1)
+filtered = None
+raw_data = None
+train_dataset = TensorDataset(torch.from_numpy(tiles))
+train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=1, num_workers=1, shuffle=True)
+
+
+holdout_tiles = np.squeeze(np.array(holdout))
+holdout = None
+test_dataset = TensorDataset(torch.from_numpy(holdout_tiles))
+test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, num_workers=1, shuffle=False)
 
 print("Data Loaded")
 
 model = Unet()
 
 
-epochs = 10
+epochs = 50
 lr = 1e-3
 optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
@@ -96,8 +100,8 @@ for epoch in range(epochs):
         tau = source[:,3,:,:]
 
         output = model(polyt_dapi)
-        pred = torch.squeeze(output)
-        target = torch.squeeze(tau*255).long()
+        pred = output
+        target = (tau*255).long()
         loss = torch.nn.NLLLoss()(pred, target)
 
         accelerator.backward(loss)
@@ -120,8 +124,8 @@ for epoch in range(epochs):
             tau = source[:,3,:,:]
 
             output = model(polyt_dapi)
-            pred = torch.squeeze(output)
-            target = torch.squeeze(tau*255).long()
+            pred = output
+            target = (tau*255).long()
             loss = torch.nn.NLLLoss()(pred, target)
             test_loss += loss.item()
 
@@ -132,25 +136,24 @@ for epoch in range(epochs):
 
 torch.save(model.state_dict(), 'out/protein_unet.pt')
 
+model.eval()
 i = 0
 for source in test_loader:
-    if i > 9:
-        break
-    i += 1
     batch = source[0].float()
     polyt_dapi = batch[:,0:2,:,:]
     tau = batch[:,3,:,:]
 
-    output = model(polyt_dapi)
-    pred = torch.squeeze(output[0])
-    target = torch.squeeze(tau[0]*255).long()
+    with torch.no_grad():
+        output = model(polyt_dapi)
+    pred = output.detach()
+    target = (tau*255).long()
 
     image = target.cpu().detach().numpy()
-    image = np.moveaxis(image,0,-1)
+    image = np.moveaxis(np.squeeze(image),0,-1)
     plt.imsave(f"out/true_protein{i}.png", image)
 
     inv_recon = pred.cpu().detach().numpy() 
-    inv_recon = np.argmax(inv_recon, axis=0)
+    inv_recon = np.argmax(np.squeeze(inv_recon), axis=0)
     inv_recon = np.moveaxis(inv_recon,0,-1)
     plt.imsave(f"out/recon_protein{i}.png", inv_recon)
 
